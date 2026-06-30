@@ -2,12 +2,12 @@ from app.graph import app
 from app.langfuse import langfuse_handler
 from langchain_core.messages import HumanMessage
 from dotenv import load_dotenv
-import uuid
 import traceback
+import asyncio
 
 load_dotenv()
 
-def run_email_agent():
+async def run_email_agent():
     print("=" * 60)
     print("🚀 EMAIL GENERATION & REFINEMENT AGENT CORE BOOTED")
     print("=" * 60)
@@ -39,7 +39,7 @@ def run_email_agent():
     # and wait for it to cleanly complete or exit at the END node.
     try:
         # Pass the Langfuse configuration handler in standard config to log agent pipelines
-        final_output = app.invoke(
+        final_output = await app.ainvoke(
             initial_state, 
             config={"callbacks": [langfuse_handler]}
         )
@@ -56,4 +56,4 @@ def run_email_agent():
         traceback.print_exc()
 
 if __name__ == "__main__":
-    run_email_agent()
+    asyncio.run(run_email_agent())

@@ -1,71 +1,86 @@
+import asyncio
+import re
 from langgraph.types import Command
 from controller.agent_state import AgentState
-from app.tools import send_email 
-import re
+from utils.mcp_client import mcp_client
 
-def response_synth_node(state: AgentState) -> Command:
+async def response_synth_node(state: AgentState) -> Command:
     draft = state.get('draft') or {"recipient": "", "subject": "", "body": ""}
 
+    # 1. Clean the recipient text using the regex pattern
     recipient = draft.get("recipient", "").strip()
     match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', recipient)
     
-
     if match:
-        # .group(0) grabs the actual text string matched by the regex pattern
         recipient = match.group(0).lower().strip() 
     else:
-        # Fallback just in case no email structure was detected
         recipient = recipient.replace("[", "").replace("]", "").strip()
     
     body = draft.get("body", "").strip()
+    subject = draft.get('subject', '(No Subject Line)')
 
-    # 1. Show the user the current state of the draft
+    # Update draft snapshot with the regex-cleaned email address
+    if isinstance(draft, dict):
+        draft["recipient"] = recipient
+    else:
+        draft.recipient = recipient
+
+    # 2. Render current draft snapshot details
     print("\n" + "="*50)
     print("           CURRENT EMAIL DRAFT FOR REVIEW          ")
     print("="*50)
     print(f"To:      {recipient if recipient else '[MISSING - REQUIRED]'}")
-    print(f"Subject: {draft.get('subject', '(No Subject Line)')}")
+    print(f"Subject: {subject}")
     print("-"*50)
     print("Body:")
     print(body if body else "[MISSING - REQUIRED]")
     print("="*50 + "\n")
 
-    # 2. Grab the user's intent
-    print("Options: Type 'send' to approve, or type your modification requests.")
-    user_input = input("Your input: ").strip()
+    # 3. Grab user input safely in async thread
+    print("Options: Type 'send' to approve execution, or describe changes.")
+    user_input = await asyncio.to_thread(input, "Your input: ")
+    user_input = user_input.strip()
 
-    # 3. INTERCEPT AND CHECK VALIDS BEFORE SENDING
+    # 4. HARD SEND ROUTE (Deterministic Tool Invocation)
     if user_input.lower() == 'send':
-        missing_fields = []
-        if not recipient:
-            missing_fields.append("Recipient Email")
-        if not body:
-            missing_fields.append("Email Body")
-
-        # If crucial data is missing, BLOCK the helper function call
-        if missing_fields:
-            print(f"\n❌ ERROR: Cannot send. Missing: {', '.join(missing_fields)}.")
-            print("Please provide the missing details first.")
-            
-            # Loop back to the exact same node to ask again
+        # Block if critical structures are missing
+        if not recipient or not body:
+            print("\nERROR: Cannot proceed. Critical data structures are missing.")
             return Command(
                 update={"email_status": "drafted"}, 
                 goto="response_synth_node"
             )
+            
+        print("\nApproving dispatch. Fetching Gmail MCP tools...")
+        mcp_tools = await mcp_client.get_tools()
+        tool_map = {tool.name: tool for tool in mcp_tools}
         
-        # If everything passes structural check, execute the helper safely!
-        print("\n🚀 All checks passed. Sending email...")
-        tool_result = send_email(
-            recipient=recipient,
-            subject=draft.get('subject', ''),
-            body=body
-        )
-        print(f"[Tool Output]: {tool_result}")
-        
-        return Command(update={"email_status": "sent"}, goto="__end__")
+        target_tool = "gmail_send_message"
+        if target_tool in tool_map:
+            # Construct the clean payload
+            tool_args = {
+                "to": recipient,
+                "subject": subject,
+                "body": body
+            }
+            
+            # Defensive Check: Explicitly guard against any rogue nil/empty keys
+            for field in ['attachment_paths', 'cc', 'bcc']:
+                if field in tool_args and tool_args[field] in ['', '<nil>', 'none', 'null', None]:
+                    del tool_args[field]
 
-    # 4. Handle standard text updates/modifications
+            print(f"Directly calling MCP Tool: {target_tool}...")
+            tool_result = await tool_map[target_tool].ainvoke(tool_args)
+            print(f"[Tool Execution Output]: {tool_result}")
+            
+            return Command(update={"email_status": "sent"}, goto="__end__")
+        else:
+            print(f"❌ Error: {target_tool} tool not exposed by MCP server.")
+            return Command(update={"email_status": "drafted"}, goto="response_synth_node")
+
+    # 5. HARD REVISION ROUTE (Bypasses LLM entirely)
     else:
+        print("\n📝 Routing back to update loop with feedback...")
         return Command(
             update={
                 "email_status": "requires_update",
